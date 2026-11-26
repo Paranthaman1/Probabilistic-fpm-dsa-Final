@@ -1,0 +1,252 @@
+================================================================================
+PROJECT INFORMATION & TECHNICAL DOCUMENTATION (Info.txt)
+================================================================================
+Project Title : Probabilistic Data Structures for Approximate Frequent Pattern Mining
+Team Members  : Paranthamaselvan B (A26MTAI0009) | Rohit Kumar Singh (A26MTAI0004)
+Subject       : Data Structures & Algorithms (40-Mark Project)
+Interface     : Interactive Streamlit Web GUI (Zero CLI Arguments)
+Code Standard : All Python (.py) and Jupyter Notebook (.ipynb) code cells contain
+                ZERO inline comments and ZERO docstrings. All documentation is
+                centralized in this Info.txt file.
+
+================================================================================
+1. PROJECT DIRECTORY STRUCTURE
+================================================================================
+Probabilistic_FPM_Clean_Code/
+├── Info.txt                                    - Complete documentation of files, classes, functions & usage
+├── requirements.txt                            - Python package dependencies
+├── live_market_demo.py                         - Primary Streamlit GUI: Live POS Stream & Shelf Optimizer
+├── app.py                                      - Secondary Streamlit GUI: Interactive Exp A/B & Recommender
+├── Probabilistic_FPM_Complete_Notebook-v2.ipynb- Self-contained 9-section Jupyter Notebook (comment-free code)
+├── run_all_experiments.py                      - Batch benchmark runner (10-seed CSV tables & PNG plots)
+├── data/
+│   └── groceries.csv                           - Real-world market basket dataset (9,835 txns, 169 items)
+└── src/
+    ├── hash_utils.py                           - Vectorized 64-bit SplitMix64 universal hash mixer
+    ├── data_utils.py                           - CSV loader, synthetic Zipf/Uniform stream generator & ground truth
+    ├── membership_filters.py                   - Exp A: Bloom Filter, Counting Bloom Filter, Cuckoo Filter
+    ├── frequency_estimators.py                 - Exp B: Count-Min Sketch, Count Sketch, CBF Variant, Lossy Counting
+    ├── metrics.py                              - Precision, Recall, F1, Support MAE, Max Error & Pass-2 evaluator
+    └── real_world_recommender.py               - 4-stage Retail Cross-Sell & Association Rule Engine
+
+================================================================================
+2. INSTALLATION & USAGE INSTRUCTIONS (NO CLI ARGUMENTS)
+================================================================================
+Prerequisites: Python 3.9+
+
+Step 1 - Install dependencies:
+    pip install -r requirements.txt
+
+Step 2 - Launch the Primary Live Supermarket Stream GUI (Recommended Demo):
+    python -m streamlit run live_market_demo.py
+
+    Controls inside the Streamlit GUI (all configured via sidebar sliders/buttons, zero CLI flags):
+    - Algorithm selector: Count-Min Sketch (CMS), Count Sketch (CS), or Counting Bloom Variant
+    - Fixed Memory Budget slider: 16 KB to 1024 KB (strict physical .nbytes RAM allocation)
+    - Hash Depth (d) selector: 3, 5, or 7 rows
+    - Minimum Support (theta %) and Minimum Confidence (%) sliders
+    - Pass-2 Exact Recount toggle (compare raw single-pass sketch vs. two-pass verified accuracy)
+    - Stream playback buttons: Start Live Stream, Pause, Step +1 Batch, Stream All Now, Reset
+    - Live tabs: Shelf Placement Recommendations, O(1) vs O(|C|) Memory & Accuracy Charts,
+      Live CMS vs. Count Sketch Race, and Interactive Customer Cart Recommender
+
+Step 3 - Launch the Full Multi-Experiment Benchmark GUI (Optional):
+    python -m streamlit run app.py
+
+Step 4 - Open the Complete End-to-End Jupyter Notebook:
+    jupyter notebook Probabilistic_FPM_Complete_Notebook-v2.ipynb
+    (Run cells top-to-bottom to inspect all 9 sections: EDA, all 7 algorithms, Exp A,
+     Exp B, Time/Space Complexity Scaling, Synthetic 10K-100K Study, and Retail Cross-Sell Demo.)
+
+Step 5 - Regenerate All 10-Seed CSV Tables & PNG Charts:
+    python run_all_experiments.py
+
+================================================================================
+3. MODULE, CLASS & FUNCTION REFERENCE
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 src/hash_utils.py
+--------------------------------------------------------------------------------
+- mix_hash_vec(keys: np.ndarray, seed: int) -> np.ndarray
+  Vectorized 64-bit SplitMix64 universal hash mixer operating over NumPy uint64 arrays.
+  Shared identically across all probabilistic structures for deterministic 10-seed fairness.
+  Time Complexity: O(1) per key.
+
+--------------------------------------------------------------------------------
+3.2 src/data_utils.py
+--------------------------------------------------------------------------------
+- load_groceries_csv(filepath: str) -> list[list[str]]
+  Parses variable-length shopping baskets from groceries.csv, deduplicating and sorting
+  items lexicographically per transaction for canonical itemset encoding.
+
+- generate_synthetic_transactions(num_transactions, num_items, avg_length,
+  distribution, zipf_alpha, seed) -> list[list[int]]
+  In-memory synthetic market-basket stream generator supporting 'uniform' (flat item
+  popularity) and 'skewed' (Zipf power-law heavy-hitters) distributions with Poisson
+  basket lengths for scaling studies (10K to 100K+ transactions).
+
+- build_candidate_stream(transactions, max_len=3, absent_seed=42, build_absent=True) -> dict
+  Generates all observed itemsets of lengths 1..max_len, packs sorted combinations into
+  unique uint64 keys (16 bits per item ID), computes exact ground-truth counts outside
+  sketch timing, and builds an equal-sized set of guaranteed-absent length-3 keys for Exp A.
+
+--------------------------------------------------------------------------------
+3.3 src/membership_filters.py  [EXPERIMENT A: APPROXIMATE MEMBERSHIP]
+--------------------------------------------------------------------------------
+- class BloomFilter(n: int, p: float, seed: int = 0)
+  Standard bit-packed Bloom Filter using optimal bit count m = ceil(-n ln(p) / (ln 2)^2)
+  and k = round((m/n) ln 2) hash functions stored in contiguous np.uint8 byte arrays.
+  Methods:
+    * insert_batch(keys)  - Sets k bit positions per key. Time: O(k).
+    * query_batch(keys)   - Returns boolean presence array (0% FNR). Time: O(k).
+    * memory_bytes()      - Exact RAM via bits.nbytes. Space: O(m bits).
+
+- class CountingBloomFilter(n: int, p: float, counter_bits: int = 8, seed: int = 0)
+  Dynamic Bloom Filter replacing 1-bit flags with 8-, 16-, or 32-bit unsigned integer
+  counters to support deletions while tracking counter saturation overflows.
+  Methods:
+    * insert_batch(keys)  - Increments k counters per key with overflow detection. Time: O(k).
+    * query_batch(keys)   - Checks all k counters > 0. Time: O(k).
+    * delete_batch(keys)  - Safely decrements k counters without underflow. Time: O(k).
+    * memory_bytes()      - Exact RAM via counters.nbytes. Space: O(m * counter_bits).
+
+- class CuckooFilter(capacity, bucket_size=4, fp_bits=12, max_kicks=150, seed=0)
+  Partial-key Cuckoo Hash Filter storing f-bit fingerprints in 2^r buckets of b slots.
+  Computes alternate bucket via XOR: b2 = b1 XOR hash(fp), supporting dynamic deletes
+  and random-walk eviction kicks without storing original keys.
+  Methods:
+    * _hash_and_fp(keys)  - Computes primary bucket b1, alternate bucket b2, non-zero fp.
+    * insert_batch(keys)  - Places fp in b1/b2 or evicts up to max_kicks; records failures.
+    * query_batch(keys)   - Checks both candidate buckets in O(b) = O(1).
+    * delete_batch(keys)  - Removes matching fingerprint from b1 or b2 in O(b) = O(1).
+    * load_factor()       - Returns fraction of occupied slots (alpha).
+    * memory_bytes()      - Exact RAM via buckets.nbytes.
+
+--------------------------------------------------------------------------------
+3.4 src/frequency_estimators.py  [EXPERIMENT B: SUPPORT ESTIMATORS & BASELINE]
+--------------------------------------------------------------------------------
+- class CountMinSketch(memory_bytes: int, d: int = 5, seed: int = 0)
+  2D matrix (d x w) of unsigned 32-bit counters locked to exact memory_bytes (w = bytes // 4d).
+  Guarantees one-sided additive error: f(X) <= f_hat(X) <= f(X) + eps*M w.p. >= 1 - delta
+  (strictly 100% Recall; never underestimates).
+  Methods:
+    * from_epsilon_delta(eps, delta, seed) - Constructs w = ceil(e/eps), d = ceil(ln(1/delta)).
+    * update_batch(stream) - Vectorized bincount accumulation across d rows. Time: O(d).
+    * query_batch(keys)    - Minimum counter across d hashed positions. Time: O(d).
+    * memory_bytes()       - Exact table RAM via table.nbytes. Space: O(w * d) fixed.
+
+- class CountSketch(memory_bytes: int, d: int = 5, seed: int = 0)
+  2D matrix (d x w) of signed 32-bit counters paired with +/-1 Rademacher sign hashes.
+  Unbiased estimator E[f_hat(X)] = f(X) canceling collision noise via median across rows.
+  Methods:
+    * update_batch(stream) - Adds +/-1 signed counts across d rows. Time: O(d).
+    * query_batch(keys)    - Returns median(sign_r * table[r, col_r]). Time: O(d log d).
+    * memory_bytes()       - Exact table RAM via table.nbytes. Space: O(w * d) fixed.
+
+- class CountingBloomEstimator(memory_bytes: int, k: int = 5, seed: int = 0)
+  Counting Bloom Filter variant adapted for frequency estimation: 1D shared array of
+  m = bytes // 4 uint32 counters returning minimum counter across k hashed slots.
+  Methods: update_batch(stream), query_batch(keys), memory_bytes(). Time: O(k).
+
+- class LossyCounting(eps: float)
+  Deterministic streaming baseline (Manku & Motwani, 2002) pruning infrequent items every
+  w = ceil(1/eps) stream updates. Guarantees f(X) - eps*M <= f_hat(X) <= f(X) (100% Precision).
+  Methods: update_stream(stream), query_batch(keys), peak_memory_bytes().
+
+--------------------------------------------------------------------------------
+3.5 src/metrics.py
+--------------------------------------------------------------------------------
+- compute_mining_metrics(est_counts, true_counts, n_txns, theta=0.01) -> dict
+  Computes Precision, Recall, F1-Score, Support MAE, Max Support Error, survivor count,
+  and true frequent count strictly BEFORE any second-pass exact recount.
+
+- evaluate_two_pass_verification(est_counts, true_counts, n_txns, theta=0.01) -> dict
+  Evaluates the two-pass verification pipeline (exact recount of sketch survivors only),
+  returning Verified Precision, Verified Recall, Verified F1, and Candidates Pruned (%).
+
+--------------------------------------------------------------------------------
+3.6 src/real_world_recommender.py
+--------------------------------------------------------------------------------
+- class RetailBasketRecommender(memory_kb=256, estimator='cms', min_support=0.01, min_confidence=0.30)
+  Implements the 4-stage retail cross-sell architecture:
+  1) Canonical key stream -> 2) Cuckoo Filter gatekeeper -> 3) Fixed-memory Sketch filter
+  -> 4) Optional Pass-2 exact recount & Association Rule mining (Support, Confidence, Lift).
+  Methods:
+    * fit(data, use_two_pass_recount=True, seed=0) - Trains sketch & mines association rules.
+    * recommend(cart_items, top_k=5)               - Serves ranked cross-sell recommendations.
+
+--------------------------------------------------------------------------------
+3.7 live_market_demo.py  [PRIMARY STREAMLIT LIVE DEMO GUI]
+--------------------------------------------------------------------------------
+Self-contained interactive Streamlit application simulating a continuous supermarket POS
+stream with configurable fixed RAM budgets and real-time shelf placement optimization.
+Key Functions:
+- item_label(name)                    - Formats grocery SKU names with visual icons.
+- find_groceries_path()               - Auto-locates groceries.csv across project folders.
+- prepare_dataset(csv_path, uploaded_bytes, max_len=3)
+                                      - Cached CSV/fallback loader and uint64 basket encoder.
+- make_sketch(algo, budget_kb, depth, seed)
+                                      - Instantiates CMS, Count Sketch, or CBF Estimator at fixed RAM.
+- init_stream_state(...)              - Initializes Streamlit session state for streaming & race mode.
+- ingest_next_batch(...)              - Ingests next basket batch, updates sketches & live telemetry.
+- mine_live_rules(...)                - Extracts frequent itemsets & Support/Confidence/Lift rules.
+- build_supermarket_aisle_svg(df_rules)
+                                      - Renders dynamic 6-zone SVG supermarket floorplan showing
+                                        adjacent shelf recommendations and false-positive warnings.
+
+--------------------------------------------------------------------------------
+3.8 app.py  [MULTI-EXPERIMENT BENCHMARK DASHBOARD GUI]
+--------------------------------------------------------------------------------
+Interactive 4-tab Streamlit dashboard for running Experiment A, Experiment B, the
+Real-World Retail Cross-Sell Engine, and inspecting saved 10-seed CSV/PNG artifacts.
+Key Functions:
+- load_default_groceries()            - Cached groceries.csv ground-truth loader.
+- encode_tuple(itemset_tuple, item_to_id) - Packs user-selected 1-3 itemsets into uint64 keys.
+
+--------------------------------------------------------------------------------
+3.9 run_all_experiments.py  [10-SEED BENCHMARK SUITE]
+--------------------------------------------------------------------------------
+Executes all benchmarks across 10 independent seeds and exports CSV tables + PNG figures:
+- run_experiment_a(data)              - Bloom, Counting Bloom, Cuckoo + capacity stress test.
+- run_experiment_b(data, theta=0.01)  - 64 KB to 4 MB equal-memory comparison, depth tuning,
+                                        threshold sweep, Lossy Counting, and Pass-2 verification.
+- run_experiment_c_synthetic_scaling()- Uniform vs. Zipf-skewed (50K) and 10K->100K scaling.
+- run_real_world_demo(data)           - Runs 256 KB CMS vs. CS Retail Cross-Sell Engine.
+- generate_all_plots(...)             - Saves fig1..fig4 publication charts to results/plots/.
+
+--------------------------------------------------------------------------------
+3.10 Probabilistic_FPM_Complete_Notebook-v2.ipynb  [END-TO-END JUPYTER NOTEBOOK]
+--------------------------------------------------------------------------------
+Self-contained 9-section Jupyter Notebook (all code cells stripped of inline comments and
+docstrings) covering the full experimental lifecycle on groceries.csv and synthetic streams:
+- Section 1 : Dataset loading, basket-length EDA, ground truth f(X), and 149,229 absent keys.
+- Section 2 : Packed-NumPy implementations of all 7 structures (SplitMix64 hashing).
+- Section 3 : Pre-recount and Pass-2 evaluation metric functions.
+- Section 4 : Experiment A (Bloom, CBF 8/16/32-bit, Cuckoo 8/12/16-bit, occupancy stress).
+- Section 5 : Experiment B (CMS eps/delta & depth tuning, 64 KB-4 MB equal-memory comparison,
+              support threshold sweep, Lossy Counting baseline, Pass-2 verification).
+- Section 6 : Unified theoretical Big-O & empirical time/space scaling comparison.
+- Section 7 : In-memory synthetic Uniform vs. Zipf-skewed & 10K->100K scaling study.
+- Section 8 : Live 256 KB Retail Cross-Sell & Association Rule Engine + Cart Simulator.
+- Section 9 : Production selection decision matrix, limitations, and final conclusions.
+
+================================================================================
+4. KEY BENCHMARK SUMMARY (groceries.csv: 9,835 Baskets, 579,961 Updates)
+================================================================================
+- Experiment A (Membership):
+  * Bloom Filter (p=0.001)     : 261.9 KB RAM, 0.100% FPR, 0.000% FNR (no deletes).
+  * Counting Bloom (p=0.001,8b): 2,095.3 KB RAM (8x Bloom), supports deletes, 0 overflows.
+  * Cuckoo Filter (b=4, 12-bit): 512.0 KB RAM (4.09x smaller than CBF), 0.116% FPR,
+                                 2.50x faster queries than CBF, 97.55% max stress load.
+- Experiment B (Support Estimation, theta=1.0%, 333 true frequent itemsets):
+  * 64 KB  Single-Pass         : Count Sketch 51.66% F1 vs. CMS 0.70% F1 (4.97x lower MAE).
+  * 256 KB Single-Pass         : Count Sketch 92.50% F1 vs. CMS 83.69% F1 (2.43x lower MAE).
+  * 256 KB Two-Pass Verified   : CMS 100.00% F1 (99.69% pruned, 333/333 recovered, 125 rules)
+                                 vs. Count Sketch 96.84% F1 (14 patterns missed, 119 rules).
+  * Lossy Counting (eps=0.0002): 86.3 KB peak RAM, 100.0% Precision, 69.97% Recall (82.33% F1).
+- Real-World Production Recommendation:
+  * Count-Min Sketch + Pass-2 Verification (with Bloom/Cuckoo gatekeeper) is optimal for
+    real-world retail frequent pattern mining; Count Sketch is optimal for strict single-pass
+    streams under severe RAM limits.
+================================================================================
